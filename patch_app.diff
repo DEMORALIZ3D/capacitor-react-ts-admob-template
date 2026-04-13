@@ -1,0 +1,29 @@
+<<<<<<< SEARCH
+  // Phaser Events
+  useGameEvents('PHASER_GAME_OVER', () => {
+    setGameState('GAME_OVER');
+    setDeathCount((prev) => prev + 1);
+  });
+
+  useGameEvents('SCORE_HEIGHT', (e: CustomEvent) => {
+    setScore(e.detail.score);
+  });
+
+  useGameEvents('SCORE_GRAZE', () => {
+    setGrazeScore((prev) => prev + 100);
+  });
+=======
+  // Phaser Events
+  useGameEvents('PHASER_GAME_OVER', useCallback(() => {
+    setGameState('GAME_OVER');
+    setDeathCount((prev) => prev + 1);
+  }, []));
+
+  useGameEvents('SCORE_HEIGHT', useCallback((e: CustomEvent) => {
+    setScore(e.detail.score);
+  }, []));
+
+  useGameEvents('SCORE_GRAZE', useCallback(() => {
+    setGrazeScore((prev) => prev + 100);
+  }, []));
+>>>>>>> REPLACE
