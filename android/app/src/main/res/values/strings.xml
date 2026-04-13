@@ -1,0 +1,7 @@
+<?xml version='1.0' encoding='utf-8'?>
+<resources>
+    <string name="app_name">Orbit Graze</string>
+    <string name="title_activity_main">Orbit Graze</string>
+    <string name="package_name">com.orbitgraze.game</string>
+    <string name="custom_url_scheme">com.orbitgraze.game</string>
+</resources>

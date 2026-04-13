@@ -1,11 +1,13 @@
 import * as Phaser from 'phaser';
 import { Hazard } from '../objects/Hazard';
+import { SpaceTreat } from '../objects/SpaceTreat';
 
 export class MainScene extends Phaser.Scene {
   private player!: Phaser.Types.Physics.Arcade.SpriteWithDynamicBody;
 
   // Game State
-  private state: 'ORBITING' | 'FLYING' | 'DEAD' = 'ORBITING';
+  private state: 'ORBITING' | 'FLYING' | 'DASHING' | 'DEAD' = 'ORBITING';
+  private dashTargetY: number = 0;
   private orbitPeg!: Phaser.Math.Vector2;
   private orbitAngle: number = 0;
   private orbitDirection: 1 | -1 = 1;
@@ -28,12 +30,12 @@ export class MainScene extends Phaser.Scene {
   private H!: number;
 
   private playerRadius!: number;
-  private pegRadius!: number;
   private baseTetherRadius!: number;
   private hazardBaseRadius!: number;
 
   private pegsGroup!: Phaser.GameObjects.Group;
   protected hazardsGroup!: Phaser.Physics.Arcade.Group;
+  protected treatsGroup!: Phaser.Physics.Arcade.Group;
 
   private highestY: number = 0;
   private lastGeneratedY: number = 0;
@@ -81,7 +83,6 @@ export class MainScene extends Phaser.Scene {
     this.H = this.sys.game.canvas.height;
 
     this.playerRadius = this.W * 0.03;
-    this.pegRadius = this.W * 0.02;
     this.baseTetherRadius = this.W * 0.20;
     this.hazardBaseRadius = this.W * 0.06;
 
@@ -119,6 +120,7 @@ export class MainScene extends Phaser.Scene {
 
     this.pegsGroup = this.add.group();
     this.hazardsGroup = this.physics.add.group();
+    this.treatsGroup = this.physics.add.group();
 
     // Generate Initial Level
     const startY = this.H * 0.8;
@@ -126,7 +128,7 @@ export class MainScene extends Phaser.Scene {
     this.lastGeneratedY = startY;
 
     this.orbitPeg = new Phaser.Math.Vector2(this.lastPegX, this.lastGeneratedY);
-    this.createPeg(this.orbitPeg.x, this.orbitPeg.y, this.currentTetherRadius, this.orbitSpeed);
+    this.createPeg(this.orbitPeg.x, this.orbitPeg.y, this.currentTetherRadius, this.orbitSpeed, 'NORMAL');
 
     // Generate some upcoming pegs ahead of time
     this.generateLevelAhead();
@@ -169,6 +171,7 @@ export class MainScene extends Phaser.Scene {
 
     // Setup Collision
     this.physics.add.overlap(this.player, this.hazardsGroup, this.onHazardHit, undefined, this);
+    this.physics.add.overlap(this.player, this.treatsGroup, this.onTreatHit, undefined, this);
 
     // Direction Indicator Triangle
     this.directionPointer = this.add.graphics({ x: 0, y: 0 });
@@ -222,7 +225,13 @@ export class MainScene extends Phaser.Scene {
           // Apply difficulty multiplier to generated orbits
           const speed = (0.05 / radiusMultiplier) * this.difficultyMultiplier;
 
-          this.createPeg(nextX, this.lastGeneratedY, radius, speed);
+          let type: 'NORMAL' | 'YELLOW' | 'BLUE' | 'BLACK_HOLE' = 'NORMAL';
+          const r = Math.random();
+          if (r < 0.05) type = 'BLACK_HOLE';
+          else if (r < 0.15) type = 'YELLOW';
+          else if (r < 0.25) type = 'BLUE';
+
+          this.createPeg(nextX, this.lastGeneratedY, radius, speed, type);
 
           // Hazard size scales with distance
           const distancePassed = Math.abs((this.H * 0.8) - this.lastGeneratedY);
@@ -235,6 +244,7 @@ export class MainScene extends Phaser.Scene {
           hazardScale *= this.devHazardScale;
           // Add minor individual variation
           hazardScale *= Phaser.Math.FloatBetween(0.8, 1.2);
+          hazardScale = Math.min(hazardScale, 1.25); // Cap to prevent logic block
           const hRadius = Math.round(this.hazardBaseRadius * hazardScale);
 
           // Spawn hazard in empty airspace, ensuring it avoids the orbit ring line
@@ -262,19 +272,48 @@ export class MainScene extends Phaser.Scene {
               const hazard = new Hazard(this, hazardX, hazardY, hRadius);
               this.hazardsGroup.add(hazard);
           }
+
+          // Optional Space Treat (Score > 1000)
+          const startY = this.H * 0.8;
+          const currentHeightGenerate = startY - this.lastGeneratedY;
+          if (currentHeightGenerate > (this.W * 0.05 * 1000) && Math.random() < 0.15) {
+               const treatY = hazardY - (this.H * 0.15);
+               const tRadius = this.W * 0.035;
+               const treatX = Phaser.Math.Between(this.W * 0.1, this.W * 0.9);
+               const treat = new SpaceTreat(this, treatX, treatY, tRadius);
+               this.treatsGroup.add(treat);
+          }
       }
   }
 
-  private createPeg(x: number, y: number, radius: number, speed: number) {
+  private createPeg(x: number, y: number, radius: number, speed: number, type: 'NORMAL' | 'YELLOW' | 'BLUE' | 'BLACK_HOLE') {
     const pegGraph = this.add.graphics();
-    // Faint neon orbit tether, no central anchor
-    pegGraph.lineStyle(2, 0x00ffff, 0.08);
-    pegGraph.strokeCircle(x, y, radius);
+    
+    if (type === 'BLACK_HOLE') {
+        pegGraph.fillStyle(0x000000, 1);
+        pegGraph.fillCircle(x, y, radius * 0.6);
+        pegGraph.lineStyle(4, 0x800080, 0.8);
+        pegGraph.strokeCircle(x, y, radius * 0.6);
+        if ('postFX' in pegGraph) (pegGraph as any).postFX.addGlow(0x800080, 2, 0, false, 0.1, 10);
+    } else if (type === 'YELLOW') {
+        pegGraph.lineStyle(4, 0xffff00, 0.5);
+        pegGraph.strokeCircle(x, y, radius);
+        if ('postFX' in pegGraph) (pegGraph as any).postFX.addGlow(0xffff00, 1.5, 0, false, 0.1, 10);
+    } else if (type === 'BLUE') {
+        pegGraph.lineStyle(4, 0x0088ff, 0.5);
+        pegGraph.strokeCircle(x, y, radius);
+        if ('postFX' in pegGraph) (pegGraph as any).postFX.addGlow(0x0088ff, 1.5, 0, false, 0.1, 10);
+    } else {
+        // Faint neon orbit tether, no central anchor
+        pegGraph.lineStyle(2, 0x00ffff, 0.08);
+        pegGraph.strokeCircle(x, y, radius);
+    }
 
     pegGraph.setData('worldX', x);
     pegGraph.setData('worldY', y);
     pegGraph.setData('radius', radius);
     pegGraph.setData('speed', speed);
+    pegGraph.setData('type', type);
 
     this.pegsGroup.add(pegGraph);
   }
@@ -296,7 +335,7 @@ export class MainScene extends Phaser.Scene {
   }
 
   private onHazardHit() {
-      if (this.state === 'DEAD') return;
+      if (this.state === 'DEAD' || this.state === 'DASHING') return;
       this.state = 'DEAD';
 
       this.player.setVelocity(0, 0);
@@ -305,6 +344,25 @@ export class MainScene extends Phaser.Scene {
       this.cameras.main.shake(100, 0.05);
 
       window.dispatchEvent(new CustomEvent('PHASER_GAME_OVER'));
+  }
+
+  private onTreatHit(_player: any, treat: any) {
+      if (this.state === 'DEAD' || this.state === 'DASHING') return;
+
+      const t = treat as SpaceTreat;
+      const effect = t.effectType;
+      t.destroy();
+      
+      this.tweens.add({
+          targets: this.player,
+          scale: effect === 'GROW' ? 2.5 : 0.5,
+          duration: 300,
+          yoyo: true,
+          hold: 10000,
+      });
+
+      // Visual feedback
+      this.cameras.main.flash(200, effect === 'GROW' ? 255 : 0, effect === 'GROW' ? 0 : 255, 0);
   }
 
   update(_time: number, delta: number) {
@@ -330,6 +388,15 @@ export class MainScene extends Phaser.Scene {
     } else if (this.state === 'FLYING') {
       this.updateFlying();
       this.checkGraze();
+    } else if (this.state === 'DASHING') {
+      // Create a massive trail effect while dashing
+      this.particles.emitParticleAt(this.player.x, this.player.y + this.playerRadius*2, 2);
+      
+      if (this.player.y <= this.dashTargetY) {
+          this.state = 'FLYING';
+          this.player.setScale(1); // Restore from scale 0
+          this.player.setVelocity(0, -(this.W * 2.5 * this.difficultyMultiplier));
+      }
     }
 
     this.updateCamera();
@@ -381,11 +448,43 @@ export class MainScene extends Phaser.Scene {
         }
 
         if (distSq <= tetherDistSq) {
+            const pegType = peg.getData('type');
+
+            if (pegType === 'BLACK_HOLE') {
+                this.state = 'DASHING';
+                this.player.setVelocity(0, 0);
+                this.player.setPosition(px, py);
+                this.orbitPeg.set(px, py);
+                
+                // Visual shrink
+                this.tweens.add({
+                    targets: this.player,
+                    scale: 0,
+                    duration: 300,
+                    onComplete: () => {
+                        // Pareto jump distance heavily weighted to shorter burst (10 to 1000 equivalent)
+                        const rand = Math.pow(Math.random(), 2); 
+                        const jumpDist = 10 + (rand * 990);
+                        this.dashTargetY = this.player.y - (jumpDist * this.H * 0.05); 
+                        
+                        this.player.body.velocity.y = - (this.H * 6); // Blast upwards massively
+                        this.player.body.velocity.x = 0;
+                        this.particles.emitParticleAt(this.player.x, this.player.y, 50);
+                    }
+                });
+                break;
+            }
+
             this.state = 'ORBITING';
             this.orbitPeg.set(px, py);
             this.currentTetherRadius = radius;
-            this.baseOrbitSpeed = speed;
-            this.orbitSpeed = speed;
+            
+            let finalSpeed = speed;
+            if (pegType === 'YELLOW') finalSpeed *= 2.0;
+            if (pegType === 'BLUE') finalSpeed *= 0.5;
+
+            this.baseOrbitSpeed = finalSpeed;
+            this.orbitSpeed = finalSpeed;
             this.player.setVelocity(0, 0);
 
             const angleToPlayer = Phaser.Math.Angle.Between(px, py, this.player.x, this.player.y);
@@ -423,10 +522,12 @@ export class MainScene extends Phaser.Scene {
                 to: Math.PI,
                 duration: 800,
                 ease: 'Sine.easeInOut',
-                onUpdate: (tween) => {
+                onUpdate: (tween: any) => {
                     // Mathematically overlay a pure sine wave on top of the distance interpolation
-                    const wave = Math.sin(tween.getValue());
-                    this.orbitCurrentRadius = Phaser.Math.Linear(dist, this.currentTetherRadius, tween.progress) + (wave * this.W * 0.05);
+                    const val = tween.getValue() || 0;
+                    const weight = tween.progress || 0;
+                    const wave = Math.sin(val);
+                    this.orbitCurrentRadius = Phaser.Math.Linear(dist, this.currentTetherRadius, weight) + (wave * this.W * 0.05);
                 },
                 onComplete: () => {
                     this.orbitCurrentRadius = this.currentTetherRadius;
