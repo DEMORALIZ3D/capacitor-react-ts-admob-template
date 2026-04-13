@@ -10,13 +10,26 @@ export class MainScene extends Phaser.Scene {
   private orbitAngle: number = 0;
   private orbitDirection: 1 | -1 = 1;
   private orbitSpeed: number = 0.05;
+  private orbitCurrentRadius: number = 0;
+  private currentTetherRadius!: number;
+  private baseOrbitSpeed: number = 0.05;
+
+  private slowMotionEnabled: boolean = true;
+  private difficultyMultiplier: number = 1.0;
+  private gameTimeMs: number = 0;
+  
+  private devStartSpeed: number = 0.24;
+  private devHazardScale: number = 1.0;
+
+  private directionPointer!: Phaser.GameObjects.Graphics;
+  private playerTracker!: Phaser.GameObjects.Graphics;
 
   private W!: number;
   private H!: number;
 
   private playerRadius!: number;
   private pegRadius!: number;
-  private tetherRadius!: number;
+  private baseTetherRadius!: number;
   private hazardBaseRadius!: number;
 
   private pegsGroup!: Phaser.GameObjects.Group;
@@ -26,7 +39,6 @@ export class MainScene extends Phaser.Scene {
   private lastGeneratedY: number = 0;
   private lastPegX: number = 0;
 
-  private laserLine!: Phaser.GameObjects.Line;
   private particles!: Phaser.GameObjects.Particles.ParticleEmitter;
 
   constructor() {
@@ -34,18 +46,76 @@ export class MainScene extends Phaser.Scene {
   }
 
   create() {
+    this.cameras.main.setBackgroundColor('#0b0d17');
+
+    this.gameTimeMs = 0;
+
+    const savedSettings = localStorage.getItem('slowMoSetting');
+    if (savedSettings !== null) {
+        this.slowMotionEnabled = JSON.parse(savedSettings);
+    }
+    
+    const savedSpeed = localStorage.getItem('devBaseSpeed');
+    if (savedSpeed !== null) this.devStartSpeed = parseFloat(savedSpeed);
+
+    const savedHazard = localStorage.getItem('devHazardMult');
+    if (savedHazard !== null) this.devHazardScale = parseFloat(savedHazard);
+
+    this.difficultyMultiplier = this.devStartSpeed;
+
+    const onToggleSlowMo = (e: any) => { this.slowMotionEnabled = e.detail.enabled; };
+    const onDevSet = (e: any) => {
+        this.devStartSpeed = e.detail.baseSpeed;
+        this.devHazardScale = e.detail.hazardMult;
+    };
+
+    window.addEventListener('TOGGLE_SLOWMO', onToggleSlowMo);
+    window.addEventListener('UPDATE_DEV_SETTINGS', onDevSet);
+
+    this.events.once('shutdown', () => {
+       window.removeEventListener('TOGGLE_SLOWMO', onToggleSlowMo);
+       window.removeEventListener('UPDATE_DEV_SETTINGS', onDevSet);
+    });
+
     this.W = this.sys.game.canvas.width;
     this.H = this.sys.game.canvas.height;
 
     this.playerRadius = this.W * 0.03;
     this.pegRadius = this.W * 0.02;
-    this.tetherRadius = this.W * 0.20;
+    this.baseTetherRadius = this.W * 0.20;
     this.hazardBaseRadius = this.W * 0.06;
+
+    // Starfield Background
+    const starGraph = this.make.graphics({ x: 0, y: 0 });
+    starGraph.fillStyle(0xffffff, 0.8);
+    starGraph.fillCircle(1.5, 1.5, 1.5);
+    starGraph.generateTexture('starParticle', 3, 3);
+    
+    this.add.particles(0, 0, 'starParticle', {
+        x: { min: 0, max: this.W },
+        y: { min: -this.H, max: this.H * 3 },
+        alpha: { start: 0.1, end: 0.9 },
+        scale: { min: 1.5, max: 3.5 },
+        lifespan: { min: 2000, max: 5000 },
+        frequency: 50,
+        blendMode: 'ADD'
+    });
+
+    // Player Out-of-bounds Tracker
+    this.playerTracker = this.add.graphics({ x: 0, y: 0 });
+    this.playerTracker.fillStyle(0xffffff, 0.5);
+    this.playerTracker.fillTriangle(-8, -8, -8, 8, 12, 0);
+    this.playerTracker.setScrollFactor(0); // Pin to UI layer
+    this.playerTracker.setDepth(20);
+    this.playerTracker.setVisible(false);
 
     this.state = 'ORBITING';
     this.orbitDirection = 1;
     this.highestY = 0;
     this.orbitSpeed = 0.05;
+    this.baseOrbitSpeed = 0.05;
+    this.currentTetherRadius = this.baseTetherRadius;
+    this.orbitCurrentRadius = this.currentTetherRadius;
 
     this.pegsGroup = this.add.group();
     this.hazardsGroup = this.physics.add.group();
@@ -56,19 +126,21 @@ export class MainScene extends Phaser.Scene {
     this.lastGeneratedY = startY;
 
     this.orbitPeg = new Phaser.Math.Vector2(this.lastPegX, this.lastGeneratedY);
-    this.createPeg(this.orbitPeg.x, this.orbitPeg.y);
+    this.createPeg(this.orbitPeg.x, this.orbitPeg.y, this.currentTetherRadius, this.orbitSpeed);
 
     // Generate some upcoming pegs ahead of time
     this.generateLevelAhead();
 
     // Player
     const playerGraph = this.make.graphics({ x: 0, y: 0 });
-    playerGraph.fillStyle(0x00ffff, 1);
-    playerGraph.fillCircle(this.playerRadius, this.playerRadius, this.playerRadius);
+    playerGraph.fillStyle(0xffffff, 1);
+    playerGraph.fillCircle(this.playerRadius, this.playerRadius, this.playerRadius * 0.6);
+    playerGraph.lineStyle(2, 0x00ffff, 0.8);
+    playerGraph.strokeCircle(this.playerRadius, this.playerRadius, this.playerRadius * 0.9);
     playerGraph.generateTexture('playerTexture', this.playerRadius * 2, this.playerRadius * 2);
 
     this.player = this.physics.add.sprite(
-      this.orbitPeg.x + this.tetherRadius,
+      this.orbitPeg.x + this.currentTetherRadius,
       this.orbitPeg.y,
       'playerTexture'
     ) as Phaser.Types.Physics.Arcade.SpriteWithDynamicBody;
@@ -80,11 +152,33 @@ export class MainScene extends Phaser.Scene {
     this.player.setCollideWorldBounds(true);
     this.player.setBounce(1, 1);
 
+    // Player Trail Particles
+    const trailGraph = this.make.graphics({ x: 0, y: 0 });
+    trailGraph.fillStyle(0x00ffff, 1);
+    trailGraph.fillCircle(2, 2, 2);
+    trailGraph.generateTexture('trailParticle', 4, 4);
+
+    const trailEmitter = this.add.particles(0, 0, 'trailParticle', {
+        speed: { min: 10, max: 20 },
+        scale: { start: 1, end: 0 },
+        alpha: { start: 0.6, end: 0 },
+        blendMode: 'ADD',
+        lifespan: 300
+    });
+    trailEmitter.startFollow(this.player);
+
     // Setup Collision
     this.physics.add.overlap(this.player, this.hazardsGroup, this.onHazardHit, undefined, this);
 
-    this.laserLine = this.add.line(0, 0, 0, 0, 0, 0, 0x00ffff, 0.5);
-    this.laserLine.setOrigin(0, 0);
+    // Direction Indicator Triangle
+    this.directionPointer = this.add.graphics({ x: 0, y: 0 });
+    this.directionPointer.fillStyle(0x00ffff, 0.8);
+    this.directionPointer.beginPath();
+    this.directionPointer.moveTo(-6, -6);
+    this.directionPointer.lineTo(-6, 6);
+    this.directionPointer.lineTo(16, 0);
+    this.directionPointer.closePath();
+    this.directionPointer.fillPath();
 
     // Graze Particles
     const pGraph = this.make.graphics({ x:0, y:0 });
@@ -108,7 +202,10 @@ export class MainScene extends Phaser.Scene {
       const targetY = this.cameras.main.scrollY - this.H;
 
       while (this.lastGeneratedY > targetY) {
-          this.lastGeneratedY -= this.W * 0.45; // Vertical spacing between pegs
+          const prevY = this.lastGeneratedY;
+          const prevX = this.lastPegX;
+
+          this.lastGeneratedY -= this.W * 0.60; // Extra vertical spacing for way more space
 
           // Alternate X roughly between 30% and 70% of screen width
           // If last was leftish, go rightish
@@ -120,27 +217,64 @@ export class MainScene extends Phaser.Scene {
           }
           this.lastPegX = nextX;
 
-          this.createPeg(nextX, this.lastGeneratedY);
+          const radiusMultiplier = Phaser.Math.FloatBetween(0.6, 1.4);
+          const radius = this.baseTetherRadius * radiusMultiplier;
+          // Apply difficulty multiplier to generated orbits
+          const speed = (0.05 / radiusMultiplier) * this.difficultyMultiplier;
 
-          // Spawn hazard in empty airspace
-          // Hazard X should be roughly between the two pegs, or on the opposite side
+          this.createPeg(nextX, this.lastGeneratedY, radius, speed);
+
+          // Hazard size scales with distance
+          const distancePassed = Math.abs((this.H * 0.8) - this.lastGeneratedY);
+          // Extended distance to make ramp up super slow initially
+          const difficultyFactor = Math.min(distancePassed / (40 * this.W), 1.0);
+          
+          // Exponential ramp: starts tiny (10%) and barely grows at first
+          let hazardScale = 0.10 + (Math.pow(difficultyFactor, 2) * 1.40); 
+          // Inject dev settings override scale
+          hazardScale *= this.devHazardScale;
+          // Add minor individual variation
+          hazardScale *= Phaser.Math.FloatBetween(0.8, 1.2);
+          const hRadius = Math.round(this.hazardBaseRadius * hazardScale);
+
+          // Spawn hazard in empty airspace, ensuring it avoids the orbit ring line
           const hazardY = this.lastGeneratedY + (this.W * 0.22);
-          const hazardX = Phaser.Math.Between(this.W * 0.1, this.W * 0.9);
+          let hazardX = Phaser.Math.Between(this.W * 0.1, this.W * 0.9);
 
-          const hazard = new Hazard(this, hazardX, hazardY, this.hazardBaseRadius);
-          this.hazardsGroup.add(hazard);
+          let attempts = 0;
+          let safeSpotFound = false;
+          while (attempts < 30) {
+              const distToNewOrbit = Phaser.Math.Distance.Between(hazardX, hazardY, nextX, this.lastGeneratedY);
+              const distToPrevOrbit = Phaser.Math.Distance.Between(hazardX, hazardY, prevX, prevY);
+              
+              const safeDistNew = radius + hRadius + (this.W * 0.06);
+              const safeDistPrev = this.baseTetherRadius * 1.4 + hRadius + (this.W * 0.06);
+
+              if (distToNewOrbit > safeDistNew && distToPrevOrbit > safeDistPrev) {
+                  safeSpotFound = true;
+                  break; 
+              }
+              hazardX = Phaser.Math.Between(this.W * 0.1, this.W * 0.9);
+              attempts++;
+          }
+
+          if (safeSpotFound) {
+              const hazard = new Hazard(this, hazardX, hazardY, hRadius);
+              this.hazardsGroup.add(hazard);
+          }
       }
   }
 
-  private createPeg(x: number, y: number) {
+  private createPeg(x: number, y: number, radius: number, speed: number) {
     const pegGraph = this.add.graphics();
-    pegGraph.fillStyle(0xffffff, 1);
-    pegGraph.fillCircle(x, y, this.pegRadius);
-    pegGraph.lineStyle(2, 0xffffff, 0.2);
-    pegGraph.strokeCircle(x, y, this.tetherRadius);
+    // Faint neon orbit tether, no central anchor
+    pegGraph.lineStyle(2, 0x00ffff, 0.08);
+    pegGraph.strokeCircle(x, y, radius);
 
     pegGraph.setData('worldX', x);
     pegGraph.setData('worldY', y);
+    pegGraph.setData('radius', radius);
+    pegGraph.setData('speed', speed);
 
     this.pegsGroup.add(pegGraph);
   }
@@ -150,14 +284,15 @@ export class MainScene extends Phaser.Scene {
 
     this.state = 'FLYING';
     const tangentAngle = this.orbitAngle + (this.orbitDirection === 1 ? Math.PI / 2 : -Math.PI / 2);
-    const flySpeed = this.W * 2.5;
+    // Apply difficulty multiplier to flight
+    const flySpeed = this.W * 2.5 * this.difficultyMultiplier;
 
     this.player.setVelocity(
       Math.cos(tangentAngle) * flySpeed,
       Math.sin(tangentAngle) * flySpeed
     );
 
-    this.laserLine.setVisible(false);
+    this.directionPointer.setVisible(false);
   }
 
   private onHazardHit() {
@@ -174,6 +309,21 @@ export class MainScene extends Phaser.Scene {
 
   update(_time: number, delta: number) {
     if (this.state === 'DEAD') return;
+
+    // Difficulty ramp logic
+    this.gameTimeMs += delta;
+    // Ramp dynamically based on the user's dev starting speed
+    this.difficultyMultiplier = this.devStartSpeed + (this.gameTimeMs / 60000) * 0.4; 
+    if (this.difficultyMultiplier > 2.5) this.difficultyMultiplier = 2.5;
+
+    // Tracker UI Update
+    this.updateTracker();
+
+    // Check if player fell off the bottom of the screen
+    if (this.player.y > this.cameras.main.scrollY + this.H + (this.W * 0.1)) {
+        this.onHazardHit(); // Reuse the death sequence
+        return;
+    }
 
     if (this.state === 'ORBITING') {
       this.updateOrbiting(delta);
@@ -192,19 +342,16 @@ export class MainScene extends Phaser.Scene {
     this.player.setVelocity(0, 0);
     this.orbitAngle += this.orbitSpeed * this.orbitDirection * (delta / 16.6);
 
-    const px = this.orbitPeg.x + Math.cos(this.orbitAngle) * this.tetherRadius;
-    const py = this.orbitPeg.y + Math.sin(this.orbitAngle) * this.tetherRadius;
+    const px = this.orbitPeg.x + Math.cos(this.orbitAngle) * this.orbitCurrentRadius;
+    const py = this.orbitPeg.y + Math.sin(this.orbitAngle) * this.orbitCurrentRadius;
     this.player.setPosition(px, py);
 
     const tangentAngle = this.orbitAngle + (this.orbitDirection === 1 ? Math.PI / 2 : -Math.PI / 2);
-    const laserLength = this.W * 0.15;
-
-    this.laserLine.setVisible(true);
-    this.laserLine.setTo(
-      px, py,
-      px + Math.cos(tangentAngle) * laserLength,
-      py + Math.sin(tangentAngle) * laserLength
-    );
+    // Draw the indicator slightly offset from player body radially outside
+    const pointerDist = this.playerRadius * 1.5;
+    this.directionPointer.setVisible(true);
+    this.directionPointer.setPosition(px + Math.cos(tangentAngle) * pointerDist, py + Math.sin(tangentAngle) * pointerDist);
+    this.directionPointer.setRotation(tangentAngle);
   }
 
   private updateFlying() {
@@ -217,16 +364,28 @@ export class MainScene extends Phaser.Scene {
         if (px === this.orbitPeg.x && py === this.orbitPeg.y) continue;
         if (py >= this.orbitPeg.y) continue;
 
-        const distSq = Phaser.Math.Distance.BetweenPointsSquared(
-           { x: this.player.x, y: this.player.y },
-           { x: px, y: py }
-        );
+        const dx = px - this.player.x;
+        const dy = py - this.player.y;
+        const distSq = dx*dx + dy*dy;
+        const dist = Math.sqrt(distSq);
 
-        const tetherDistSq = this.tetherRadius * this.tetherRadius;
+        const radius = peg.getData('radius');
+        const speed = peg.getData('speed');
+        const tetherDistSq = radius * radius;
+
+        // Gentle "Planets pull" freeflight gravity (reduced drastically to prevent orbit edge snapping)
+        if (dist > 0 && dist < this.W * 1.5) {
+            const pullForce = (200 * radius) / Math.max(distSq, 1);
+            this.player.body.velocity.x += (dx / dist) * pullForce;
+            this.player.body.velocity.y += (dy / dist) * pullForce;
+        }
 
         if (distSq <= tetherDistSq) {
             this.state = 'ORBITING';
             this.orbitPeg.set(px, py);
+            this.currentTetherRadius = radius;
+            this.baseOrbitSpeed = speed;
+            this.orbitSpeed = speed;
             this.player.setVelocity(0, 0);
 
             const angleToPlayer = Phaser.Math.Angle.Between(px, py, this.player.x, this.player.y);
@@ -235,16 +394,44 @@ export class MainScene extends Phaser.Scene {
             // Determine direction
             const vx = this.player.body.velocity.x;
             const vy = this.player.body.velocity.y;
-            const dx = px - this.player.x;
-            const dy = py - this.player.y;
 
-            // Cross product to find side
+            const currentScore = this.registry.get('score') || 0;
+            if (currentScore > 500) {
+                 const vMag = Math.sqrt(vx*vx + vy*vy);
+                 if (vMag > 0 && dist > 0) {
+                     const dot = ((vx/vMag) * (-dx/dist)) + ((vy/vMag) * (-dy/dist));
+                     const align = Math.abs(dot); // 1 = direct hit, 0 = tangent
+                     if (align < 0.2) {
+                          this.orbitSpeed *= 1.5; // Boost grazing!
+                     } else if (align > 0.8) {
+                          this.orbitSpeed *= 0.4; // Friction damping headon!
+                     }
+                     this.baseOrbitSpeed = this.orbitSpeed;
+                 }
+            }
+
+            // Cross product to find side confirms angular momentum direction
             const crossProduct = (vx * dy) - (vy * dx);
             this.orbitDirection = crossProduct > 0 ? 1 : -1;
 
-            const snapX = px + Math.cos(this.orbitAngle) * this.tetherRadius;
-            const snapY = py + Math.sin(this.orbitAngle) * this.tetherRadius;
-            this.player.setPosition(snapX, snapY);
+            // Orbit entry bloom burst
+            this.particles.emitParticleAt(this.player.x, this.player.y, 25);
+
+            // Smooth Synth Wave in and out (no ball distortion)
+            this.tweens.addCounter({
+                from: 0,
+                to: Math.PI,
+                duration: 800,
+                ease: 'Sine.easeInOut',
+                onUpdate: (tween) => {
+                    // Mathematically overlay a pure sine wave on top of the distance interpolation
+                    const wave = Math.sin(tween.getValue());
+                    this.orbitCurrentRadius = Phaser.Math.Linear(dist, this.currentTetherRadius, tween.progress) + (wave * this.W * 0.05);
+                },
+                onComplete: () => {
+                    this.orbitCurrentRadius = this.currentTetherRadius;
+                }
+            });
 
             break;
         }
@@ -265,7 +452,8 @@ export class MainScene extends Phaser.Scene {
           );
 
           const visualRadius = h.getData('visualRadius') as number;
-          const grazeDistance = visualRadius + this.playerRadius + (this.W * 0.05);
+          // Trigger sooner by creating a far wider "graze" hitbox
+          const grazeDistance = visualRadius + this.playerRadius + (this.W * 0.12);
 
           if (distSq < (grazeDistance * grazeDistance)) {
               // Trigger Graze
@@ -275,16 +463,39 @@ export class MainScene extends Phaser.Scene {
               // Particles
               this.particles.emitParticleAt(this.player.x, this.player.y, 10);
 
-              // Micro slow-mo
-              this.physics.world.timeScale = 2; // Physics run half speed
-              this.time.timeScale = 0.5; // Tweens run half speed
-              this.orbitSpeed = 0.025;
+              if (this.slowMotionEnabled) {
+                  // Extended Cinematic slow-mo
+                  this.physics.world.timeScale = 2; // Physics run half speed
+                  this.time.timeScale = 0.5; // Tweens run half speed
+                  this.orbitSpeed = this.baseOrbitSpeed * 0.5;
 
-              this.time.delayedCall(150, () => {
-                  this.physics.world.timeScale = 1;
-                  this.time.timeScale = 1;
-                  this.orbitSpeed = 0.05;
-              });
+                  this.tweens.add({
+                      targets: this.cameras.main,
+                      zoom: 1.3,
+                      duration: 150,
+                      ease: 'Sine.easeOut'
+                  });
+
+                  // Stay slow-mo longer, snap zoom out quicker
+                  this.time.delayedCall(800, () => {
+                      this.physics.world.timeScale = 1;
+                      this.time.timeScale = 1;
+                      this.orbitSpeed = this.baseOrbitSpeed;
+
+                      this.tweens.add({
+                          targets: this.cameras.main,
+                          zoom: 1.0,
+                          duration: 100,
+                          ease: 'Sine.easeIn'
+                      });
+                  });
+              } else {
+                  // Standard quick graze without zoom/slowmo
+                  this.orbitSpeed = this.baseOrbitSpeed * 0.8;
+                  this.time.delayedCall(100, () => {
+                      this.orbitSpeed = this.baseOrbitSpeed;
+                  });
+              }
           }
       }
   }
@@ -309,6 +520,31 @@ export class MainScene extends Phaser.Scene {
            window.dispatchEvent(new CustomEvent('SCORE_HEIGHT', { detail: { score }}));
         }
      }
+  }
+
+  private updateTracker() {
+      const cw = this.cameras.main.width;
+      const ch = this.cameras.main.height;
+      const view = this.cameras.main.worldView;
+      const margin = 20;
+
+      if (!view.contains(this.player.x, this.player.y)) {
+          this.playerTracker.setVisible(true);
+
+          let screenX = this.player.x - view.left;
+          let screenY = this.player.y - view.top;
+
+          screenX = Phaser.Math.Clamp(screenX, margin, cw - margin);
+          screenY = Phaser.Math.Clamp(screenY, margin, ch - margin);
+
+          this.playerTracker.setPosition(screenX, screenY);
+
+          // Point arrow directly at player's offscreen position
+          const angle = Phaser.Math.Angle.Between(screenX, screenY, this.player.x - view.left, this.player.y - view.top);
+          this.playerTracker.setRotation(angle);
+      } else {
+          this.playerTracker.setVisible(false);
+      }
   }
 
   private cleanupMemory() {

@@ -67,8 +67,9 @@ export class AdMobService {
 
   public static async showRewarded(onReward: () => void): Promise<void> {
     if (!this.isInitialized || !Capacitor.isNativePlatform()) {
-      console.warn('Rewarded ad simulated on web. Firing reward callback directly.');
-      onReward();
+      console.warn('Rewarded ad simulated on web. Firing 10s modal...');
+      (window as any).mockAdCallback = onReward;
+      window.dispatchEvent(new CustomEvent('SHOW_MOCK_AD'));
       return;
     }
 

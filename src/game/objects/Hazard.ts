@@ -26,6 +26,10 @@ export class Hazard extends Phaser.Physics.Arcade.Sprite {
 
         super(scene, x, y, textureKey);
 
+        if (this.postFX) {
+            this.postFX.addGlow(0xff0000, 2.5, 0, false, 0.1, 12);
+        }
+
         scene.add.existing(this);
         scene.physics.add.existing(this);
 
